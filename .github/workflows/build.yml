@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  - push
+  - workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      # - name: Install dependencies
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y \
+      #       cmake \
+      #       g++ \
+      #       lcov \
+      #       python3 \
+      #       valgrind \
+      #       ;
+      #     pip install awscli
+      - name: Configure
+        run: |
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -S . -B build
+      - name: Get the number of CPUs
+        id: cpus
+        run: |
+          import os
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"count={len(os.sched_getaffinity(0))}\n")
+        shell: python3 {0}
+      - name: Build
+        run: |
+          cmake --build build -j ${{ steps.cpus.outputs.count }}
+      - name: Test
+        run: |
+          set -e
+          build/bin/json_unit_test
+          python3 test/run_intg_tests.py build/bin/json_intg_test
+      - name: Collect coverage reports
+        id: coverage
+        run: |
+          lcov --capture --directory . --no-external --output-file coverage.info
+          lcov --extract coverage.info "*/lib_json/*" "*/include/json/*" --output-file coverage.info
+          genhtml coverage.info --prefix "$(pwd)" --output-directory coverage
+          OVERALL_COVERAGE=$(lcov --summary coverage.info | grep lines | awk "-F: " '{print $2}' | awk "-F%" '{print $1}')
+          echo "overall=${OVERALL_COVERAGE}" >> "${GITHUB_OUTPUT}"
+          cd coverage
+          wget https://img.shields.io/badge/Coverage-${OVERALL_COVERAGE}%25-green.svg -O badge.svg
+      - name: Grading
+        run: |
+          python .github/grader.py
+        env:
+          REPO_ID: ${{ github.repository_id }}
+          OVERALL_COVERAGE: ${{ steps.coverage.outputs.overall }}
+      - name: Upload coverage reports
+        run: |
+          # other env variables:
+          #   AWS_ACCESS_KEY_ID
+          #   AWS_SECRET_ACCESS_KEY
+          aws s3 sync ./coverage/ s3://"${AWS_BUCKET}"/${{ github.repository_id }} \
+            --endpoint-url https://cos."${AWS_REGION}".myqcloud.com \
+            --delete \
+            --cache-control "no-cache" \
+            ;
